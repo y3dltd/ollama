@@ -207,10 +207,10 @@ func New(modelPath string, params ml.BackendParams) (ml.Backend, error) {
 	initDevices()
 
 	// moeExpertRE matches MoE expert weight tensors within a block
-	// (the per-layer ffn_{up,down,gate}_exps projections, optionally
+	// (the per-layer ffn_{up,down,gate,gate_up}_exps projections, optionally
 	// suffixed with .weight or prefixed with ch_ for channel-separated
 	// variants).
-	var moeExpertRE = regexp.MustCompile(`\.ffn_(up|down|gate)_(ch_)?exps(\.weight)?$`)
+	var moeExpertRE = regexp.MustCompile(`\.ffn_(up|down|gate|gate_up)_(ch_)?exps(\.weight)?$`)
 	isMoEExpertTensor := func(name string) bool {
 		return moeExpertRE.MatchString(name)
 	}

@@ -333,12 +333,156 @@ func TestLLMServerMoESplitBudgetExcludesCacheFromMoELayers(t *testing.T) {
 		Cache:      make([]uint64, s.totalLayers),
 	}}}
 
-	gpuLayers, denseGPULayers, _ := s.buildLayout(gpus, s.mem, false, 0)
+	gpuLayers, denseGPULayers, _, _ := s.buildLayout(gpus, s.mem, false, 0)
 	if gpuLayers.Sum() != 1 {
 		t.Fatalf("MoE GPU layers = %v, want one layer", gpuLayers)
 	}
 	if len(denseGPULayers) != 1 || denseGPULayers[0].DeviceID != gpuID || denseGPULayers.Sum() != 2 {
 		t.Fatalf("dense GPU layers = %v, want all layers on %v", denseGPULayers, gpuID)
+	}
+}
+
+func TestLLMServerMoECPULayersMatchesFirstExpertLayers(t *testing.T) {
+	t.Setenv("OLLAMA_MOE_CPU_LAYERS", "2")
+	t.Setenv("OLLAMA_GPU_OVERHEAD", "0")
+
+	gpuID := ml.DeviceID{ID: "gpu0"}
+	minMemory := uint64(457 * format.MebiByte)
+	denseSize := uint64(50 * format.MebiByte)
+	moeSize := uint64(10 * format.MebiByte)
+	cacheSize := uint64(5 * format.MebiByte)
+	gpus := []ml.DeviceInfo{{DeviceID: gpuID, FreeMemory: minMemory + 4*(denseSize+cacheSize) + 2*moeSize}}
+
+	s := &ollamaServer{
+		llmServer: llmServer{
+			totalLayers: 4,
+			options: api.Options{
+				Runner: api.Runner{NumGPU: -1},
+			},
+		},
+	}
+	s.mem = &ml.BackendMemory{CPU: ml.DeviceMemory{
+		Weights:    []uint64{denseSize + moeSize, denseSize, denseSize + moeSize, denseSize + moeSize},
+		MoEWeights: []uint64{moeSize, 0, moeSize, moeSize},
+		Cache:      []uint64{cacheSize, cacheSize, cacheSize, cacheSize},
+	}, GPUs: []ml.DeviceMemory{{
+		DeviceID:   gpuID,
+		Weights:    make([]uint64, s.totalLayers),
+		MoEWeights: make([]uint64, s.totalLayers),
+		Cache:      make([]uint64, s.totalLayers),
+	}}}
+
+	gpuLayers, denseGPULayers, _, err := s.buildLayout(gpus, s.mem, false, 0)
+	if err != nil {
+		t.Fatalf("buildLayout returned error: %v", err)
+	}
+	expectedMoE := ml.GPULayersList{{DeviceID: gpuID, Layers: []int{2, 3}}}
+	if gpuLayers.Hash() != expectedMoE.Hash() {
+		t.Fatalf("MoE GPU layers = %v, want %v", gpuLayers, expectedMoE)
+	}
+	if len(denseGPULayers) != 1 || denseGPULayers[0].DeviceID != gpuID || denseGPULayers.Sum() != 4 {
+		t.Fatalf("dense GPU layers = %v, want all model layers on %v", denseGPULayers, gpuID)
+	}
+}
+
+func TestLLMServerMoEForcedSplitFailsWhenItCannotFit(t *testing.T) {
+	t.Setenv("OLLAMA_MOE_CPU_LAYERS", "1")
+	t.Setenv("OLLAMA_GPU_OVERHEAD", "0")
+
+	gpuID := ml.DeviceID{ID: "gpu0"}
+	minMemory := uint64(457 * format.MebiByte)
+	denseSize := uint64(50 * format.MebiByte)
+	moeSize := uint64(10 * format.MebiByte)
+	cacheSize := uint64(5 * format.MebiByte)
+	gpus := []ml.DeviceInfo{{DeviceID: gpuID, FreeMemory: minMemory + 3*(denseSize+cacheSize) + moeSize}}
+
+	s := &ollamaServer{
+		llmServer: llmServer{
+			totalLayers: 3,
+			options: api.Options{
+				Runner: api.Runner{NumGPU: -1},
+			},
+		},
+	}
+	s.mem = &ml.BackendMemory{CPU: ml.DeviceMemory{
+		Weights:    []uint64{denseSize + moeSize, denseSize + moeSize, denseSize + moeSize},
+		MoEWeights: []uint64{moeSize, moeSize, moeSize},
+		Cache:      []uint64{cacheSize, cacheSize, cacheSize},
+	}, GPUs: []ml.DeviceMemory{{
+		DeviceID:   gpuID,
+		Weights:    make([]uint64, s.totalLayers),
+		MoEWeights: make([]uint64, s.totalLayers),
+		Cache:      make([]uint64, s.totalLayers),
+	}}}
+
+	if _, _, _, err := s.buildLayout(gpus, s.mem, false, 0); err == nil {
+		t.Fatal("buildLayout succeeded, want forced MoE split allocation error")
+	}
+}
+
+func TestLLMServerMoESplitRejectsConflictingOverrides(t *testing.T) {
+	t.Setenv("OLLAMA_MOE_CPU_LAYERS", "1")
+	t.Setenv("OLLAMA_MOE_GPU_LAYERS", "1")
+
+	_, _, err := (&llmServer{totalLayers: 1}).createLayout(ml.SystemInfo{}, nil, &ml.BackendMemory{
+		CPU: ml.DeviceMemory{
+			Weights:    []uint64{1},
+			MoEWeights: []uint64{1},
+			Cache:      []uint64{0},
+		},
+	}, false, 0)
+	if err == nil {
+		t.Fatal("createLayout succeeded, want conflicting MoE override error")
+	}
+}
+
+func TestLLMServerMoESplitRejectsInvalidNegativeGPULayers(t *testing.T) {
+	t.Setenv("OLLAMA_MOE_GPU_LAYERS", "-2")
+
+	_, _, err := (&llmServer{totalLayers: 1}).createLayout(ml.SystemInfo{}, nil, &ml.BackendMemory{
+		CPU: ml.DeviceMemory{
+			Weights:    []uint64{1},
+			MoEWeights: []uint64{1},
+			Cache:      []uint64{0},
+		},
+	}, false, 0)
+	if err == nil {
+		t.Fatal("createLayout succeeded, want invalid GPU override error")
+	}
+}
+
+func TestLLMServerMoEForcedSplitFailsWhenDenseCacheCannotFit(t *testing.T) {
+	t.Setenv("OLLAMA_MOE_CPU_LAYERS", "1")
+	t.Setenv("OLLAMA_GPU_OVERHEAD", "0")
+
+	gpuID := ml.DeviceID{ID: "gpu0"}
+	minMemory := uint64(457 * format.MebiByte)
+	denseSize := uint64(100 * format.MebiByte)
+	moeSize := uint64(10 * format.MebiByte)
+	cacheSize := uint64(10 * format.MebiByte)
+	gpus := []ml.DeviceInfo{{DeviceID: gpuID, FreeMemory: minMemory + denseSize + cacheSize}}
+
+	s := &ollamaServer{
+		llmServer: llmServer{
+			totalLayers: 2,
+			options: api.Options{
+				Runner: api.Runner{NumGPU: -1},
+			},
+		},
+	}
+	s.mem = &ml.BackendMemory{CPU: ml.DeviceMemory{
+		Weights:    []uint64{denseSize + moeSize, denseSize + moeSize},
+		MoEWeights: []uint64{moeSize, moeSize},
+		Cache:      []uint64{cacheSize, cacheSize},
+	}, GPUs: []ml.DeviceMemory{{
+		DeviceID:   gpuID,
+		Weights:    make([]uint64, s.totalLayers),
+		MoEWeights: make([]uint64, s.totalLayers),
+		Cache:      make([]uint64, s.totalLayers),
+	}}}
+
+	if _, _, _, err := s.buildLayout(gpus, s.mem, false, 0); err == nil {
+		t.Fatal("buildLayout succeeded, want dense/cache fit error")
 	}
 }
 

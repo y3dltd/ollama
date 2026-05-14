@@ -218,15 +218,18 @@ var (
 	DebugLogRequests = Bool("OLLAMA_DEBUG_LOG_REQUESTS")
 	// KvCacheType is the quantization type for the K/V cache.
 	KvCacheType = String("OLLAMA_KV_CACHE_TYPE")
-	// MoeGpuLayers controls how many layers have MoE expert weights resident on GPU.
+	// MoeGpuLayers controls how many MoE expert layers have expert weights resident on GPU.
 	//    0 (default) = disable MoE split (default weight layout, useful for baseline comparison)
 	//   -1           = auto-compute from remaining VRAM after dense allocation
-	//   >0           = force this many layers to have MoE on GPU
+	//   >0           = force this many MoE expert layers to have MoE on GPU
 	MoeGpuLayers = Int("OLLAMA_MOE_GPU_LAYERS", 0)
+	// MoeCpuLayers controls how many MoE expert layers have expert weights resident on CPU.
+	// This mirrors llama.cpp --n-cpu-moe. It is mutually exclusive with OLLAMA_MOE_GPU_LAYERS.
+	MoeCpuLayers = Int("OLLAMA_MOE_CPU_LAYERS", 0)
 	// MoePinned enables cudaHostRegister for CPU-side MoE expert weight buffers.
 	// When enabled, the CUDA Copy Engine can DMA directly from mmap memory
 	// without CPU-side staging.
-	// Requires MoE split to be active (OLLAMA_MOE_GPU_LAYERS != 0).
+	// Requires MoE split to be active.
 	// Default: false (original pageable behavior).
 	MoePinned = Bool("OLLAMA_MOE_PINNED")
 	// MoePrefetch enables lookahead copy inside ggml_backend_sched_compute_splits:
